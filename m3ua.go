@@ -12,13 +12,21 @@ func ParseM3UA(data []byte) (M3UAMessage, bool) {
 		return M3UAMessage{}, false
 	}
 
+	length := int(uint32(data[4])<<24 |
+		uint32(data[5])<<16 |
+		uint32(data[6])<<8 |
+		uint32(data[7]))
+
+	if length > len(data) {
+		return M3UAMessage{}, false
+	}
+
 	msg := M3UAMessage{
 		Class: data[2],
 		Type:  data[3],
 	}
 
-	// skip header
-	msg.Payload = data[8:]
+	msg.Payload = data[8:length]
 
 	return msg, true
 }
