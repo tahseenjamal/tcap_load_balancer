@@ -7,7 +7,7 @@ type SCCPMessage struct {
 
 func ParseSCCP(data []byte) (SCCPMessage, bool) {
 
-	if len(data) < 5 {
+	if len(data) < 4 {
 		return SCCPMessage{}, false
 	}
 
@@ -15,8 +15,13 @@ func ParseSCCP(data []byte) (SCCPMessage, bool) {
 		Type: data[0],
 	}
 
-	// simplified: payload after SCCP header
-	msg.Payload = data[5:]
+	offset := int(data[1])
+
+	if offset >= len(data) {
+		return SCCPMessage{}, false
+	}
+
+	msg.Payload = data[offset:]
 
 	return msg, true
 }
