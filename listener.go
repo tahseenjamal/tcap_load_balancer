@@ -27,7 +27,7 @@ func StartListener(addr string) {
 func handleConn(conn net.Conn) {
 	defer conn.Close()
 
-	buf := make([]byte, 8192)
+	buf := make([]byte, 65535)
 
 	for {
 
