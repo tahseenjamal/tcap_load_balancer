@@ -14,7 +14,6 @@ type Backend struct {
 
 type BackendPool struct {
 	backends []Backend
-	counter  uint64
 }
 
 func NewBackendPool(addrs []string) *BackendPool {
