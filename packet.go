@@ -1,3 +1,7 @@
 package main
 
-var packetQueue = make(chan []byte, 500000)
+type Packet struct {
+	Data []byte
+}
+
+var packetQueue = make(chan Packet, 500000)
