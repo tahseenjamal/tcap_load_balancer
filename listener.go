@@ -10,7 +10,10 @@ import (
 
 func StartListener(addr string) {
 
-	ip, port, _ := net.SplitHostPort(addr)
+	ip, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	sctpAddr := &sctp.SCTPAddr{
 		IPAddrs: []net.IPAddr{
@@ -36,11 +39,6 @@ func StartListener(addr string) {
 	}
 }
 
-func atoi(s string) int {
-	i, _ := strconv.Atoi(s)
-	return i
-}
-
 func handleConn(conn net.Conn) {
 	defer conn.Close()
 
@@ -62,4 +60,12 @@ func handleConn(conn net.Conn) {
 			log.Println("packet queue full, dropping packet")
 		}
 	}
+}
+
+func atoi(s string) int {
+	i, err := strconv.Atoi(s)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return i
 }

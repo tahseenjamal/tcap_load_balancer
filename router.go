@@ -78,7 +78,7 @@ func (r *Router) Route(msg TCAPMessage, raw []byte) {
 			return
 		}
 
-		backend := &r.pool.backends[tx.Backend]
+		backend := r.pool.Get(tx.Backend)
 
 		err := backend.Write(raw)
 		if err != nil {
@@ -88,8 +88,4 @@ func (r *Router) Route(msg TCAPMessage, raw []byte) {
 		// remove session after transaction completes
 		r.txTable.Delete(msg.DTID)
 	}
-}
-
-func (p *BackendPool) Get(idx int) *Backend {
-	return &p.backends[idx]
 }

@@ -62,3 +62,7 @@ func (b *Backend) Write(data []byte) error {
 	_, err := b.Conn.Write(data)
 	return err
 }
+
+func (p *BackendPool) Get(idx int) *Backend {
+	return &p.backends[idx]
+}
