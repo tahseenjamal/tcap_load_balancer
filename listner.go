@@ -39,6 +39,10 @@ func handleConn(conn net.Conn) {
 		data := make([]byte, n)
 		copy(data, buf[:n])
 
-		packetQueue <- data
+		select {
+		case packetQueue <- data:
+		default:
+			log.Println("packet queue full, dropping packet")
+		}
 	}
 }
