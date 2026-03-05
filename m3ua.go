@@ -16,7 +16,7 @@ func ParseM3UA(data []byte) (M3UAMessage, bool) {
 
 	length := int(binary.BigEndian.Uint32(data[4:8]))
 
-	if length > len(data) {
+	if length < 8 || length > len(data) {
 		return M3UAMessage{}, false
 	}
 
