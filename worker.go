@@ -4,8 +4,21 @@ func StartWorker(router *Router) {
 
 	for pkt := range packetQueue {
 
-		msg := ParseTCAP(pkt.Data)
+		m3ua, ok := ParseM3UA(pkt.Data)
+		if !ok {
+			continue
+		}
 
-		router.Route(msg, pkt.Data)
+		sccp, ok := ParseSCCP(m3ua.Payload)
+		if !ok {
+			continue
+		}
+
+		tcap, ok := ParseTCAPASN1(sccp.Payload)
+		if !ok {
+			continue
+		}
+
+		router.Route(tcap, pkt.Data)
 	}
 }
