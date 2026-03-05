@@ -17,7 +17,7 @@ func ParseSCCP(data []byte) (SCCPMessage, bool) {
 
 	offset := int(data[1])
 
-	if offset >= len(data) {
+	if offset <= 0 || offset >= len(data) {
 		return SCCPMessage{}, false
 	}
 

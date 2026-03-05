@@ -1,5 +1,7 @@
 package main
 
+import "encoding/binary"
+
 type M3UAMessage struct {
 	Class   uint8
 	Type    uint8
@@ -12,10 +14,7 @@ func ParseM3UA(data []byte) (M3UAMessage, bool) {
 		return M3UAMessage{}, false
 	}
 
-	length := int(uint32(data[4])<<24 |
-		uint32(data[5])<<16 |
-		uint32(data[6])<<8 |
-		uint32(data[7]))
+	length := int(binary.BigEndian.Uint32(data[4:8]))
 
 	if length > len(data) {
 		return M3UAMessage{}, false
