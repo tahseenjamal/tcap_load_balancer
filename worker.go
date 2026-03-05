@@ -3,8 +3,8 @@ package main
 func StartWorker(router *Router) {
 	for pkt := range packetQueue {
 
-		msg := ParseTCAP(pkt)
+		msg := ParseTCAP(pkt.Data)
 
-		router.Route(msg, pkt)
+		router.Route(msg, pkt.Data)
 	}
 }

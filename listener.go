@@ -40,7 +40,7 @@ func handleConn(conn net.Conn) {
 		copy(data, buf[:n])
 
 		select {
-		case packetQueue <- data:
+		case packetQueue <- Packet{Data: data}:
 		default:
 			log.Println("packet queue full, dropping packet")
 		}
