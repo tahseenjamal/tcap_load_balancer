@@ -40,9 +40,16 @@ func (t *TxTable) shard(id uint64) *Shard {
 func (t *TxTable) Store(id uint64, backend int) {
 	s := t.shard(id)
 
-	s.Lock()
-	s.table[id] = TxEntry{backend, time.Now().Unix()}
-	s.Unlock()
+	s.RLock()
+	v, ok := s.table[id]
+	s.RUnlock()
+
+	if ok {
+		s.Lock()
+		v.LastSeen = time.Now().Unix()
+		s.table[id] = v
+		s.Unlock()
+	}
 }
 
 func (t *TxTable) Lookup(id uint64) (TxEntry, bool) {

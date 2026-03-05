@@ -3,10 +3,23 @@ package main
 import (
 	"log"
 	"net"
+	"strconv"
+
+	"github.com/ishidawataru/sctp"
 )
 
 func StartListener(addr string) {
-	ln, err := net.Listen("tcp", addr)
+
+	ip, port, _ := net.SplitHostPort(addr)
+
+	sctpAddr := &sctp.SCTPAddr{
+		IPAddrs: []net.IPAddr{
+			{IP: net.ParseIP(ip)},
+		},
+		Port: atoi(port),
+	}
+
+	ln, err := sctp.ListenSCTP("sctp", sctpAddr)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -14,7 +27,6 @@ func StartListener(addr string) {
 	log.Println("Listening on", addr)
 
 	for {
-
 		conn, err := ln.Accept()
 		if err != nil {
 			continue
@@ -22,6 +34,11 @@ func StartListener(addr string) {
 
 		go handleConn(conn)
 	}
+}
+
+func atoi(s string) int {
+	i, _ := strconv.Atoi(s)
+	return i
 }
 
 func handleConn(conn net.Conn) {

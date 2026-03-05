@@ -52,7 +52,7 @@ func (r *Router) Route(msg TCAPMessage, raw []byte) {
 			return
 		}
 
-		backend := &r.pool.backends[tx.Backend]
+		backend := r.pool.Get(tx.Backend)
 
 		// update OTID mapping if new one appears
 		if msg.OTID != 0 {
@@ -88,4 +88,8 @@ func (r *Router) Route(msg TCAPMessage, raw []byte) {
 		// remove session after transaction completes
 		r.txTable.Delete(msg.DTID)
 	}
+}
+
+func (p *BackendPool) Get(idx int) *Backend {
+	return &p.backends[idx]
 }
