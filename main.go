@@ -16,8 +16,6 @@ func main() {
 		go StartWorker(router)
 	}
 
-	go router.StartCleanup()
-
 	log.Println("TCAP Load Balancer Started")
 
 	StartListener(config.ListenAddr)

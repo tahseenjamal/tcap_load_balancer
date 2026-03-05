@@ -4,9 +4,17 @@ import (
 	"log"
 	"net"
 	"strconv"
+	"sync"
 
 	"github.com/ishidawataru/sctp"
 )
+
+var bufferPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 65535)
+		return &buf
+	},
+}
 
 func StartListener(addr string) {
 
@@ -42,25 +50,29 @@ func StartListener(addr string) {
 func handleConn(conn net.Conn) {
 	defer conn.Close()
 
-	buf := make([]byte, 65535)
-
 	for {
+
+		bufPtr := bufferPool.Get().(*[]byte)
+		buf := *bufPtr
 
 		n, err := conn.Read(buf)
 		if err != nil {
+			bufferPool.Put(bufPtr)
 			return
 		}
 
-		// copy buffer to avoid reuse issues
-		data := make([]byte, n)
-		copy(data, buf[:n])
+		packet := Packet{
+			Data:   buf[:n],
+			Buffer: bufPtr,
+		}
 
 		select {
 
-		case packetQueue <- Packet{Data: data}:
+		case packetQueue <- packet:
 
 		default:
 			log.Println("packet queue full, dropping packet")
+			bufferPool.Put(bufPtr)
 		}
 	}
 }

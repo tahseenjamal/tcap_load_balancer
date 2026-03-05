@@ -4,7 +4,6 @@ import (
 	"log"
 	"net"
 	"sync"
-	"sync/atomic"
 )
 
 type Backend struct {
@@ -44,14 +43,6 @@ func NewBackendPool(addrs []string) *BackendPool {
 	return &BackendPool{
 		backends: backends,
 	}
-}
-
-func (p *BackendPool) Next() (*Backend, int) {
-
-	i := atomic.AddUint64(&p.counter, 1) - 1
-	idx := int(i) % len(p.backends)
-
-	return &p.backends[idx], idx
 }
 
 func (b *Backend) Write(data []byte) error {

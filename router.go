@@ -1,19 +1,17 @@
 package main
 
 import (
+	"hash/fnv"
 	"log"
 )
 
 type Router struct {
-	txTable *TxTable
-	pool    *BackendPool
+	pool *BackendPool
 }
 
 func NewRouter(backends []string) *Router {
-
 	return &Router{
-		txTable: NewTxTable(),
-		pool:    NewBackendPool(backends),
+		pool: NewBackendPool(backends),
 	}
 }
 
@@ -28,13 +26,10 @@ func (r *Router) Route(msg TCAPMessage, raw []byte) {
 			return
 		}
 
-		backend, idx := r.pool.Next()
+		idx := hashBackend(msg.OTID, len(r.pool.backends))
+		backend := r.pool.Get(idx)
 
-		// store transaction → backend mapping
-		r.txTable.Store(msg.OTID, idx)
-
-		err := backend.Write(raw)
-		if err != nil {
+		if err := backend.Write(raw); err != nil {
 			log.Println("backend write error:", err)
 		}
 
@@ -45,22 +40,10 @@ func (r *Router) Route(msg TCAPMessage, raw []byte) {
 			return
 		}
 
-		tx, ok := r.txTable.Lookup(msg.DTID)
+		idx := hashBackend(msg.DTID, len(r.pool.backends))
+		backend := r.pool.Get(idx)
 
-		if !ok {
-			log.Println("transaction not found for DTID:", msg.DTID)
-			return
-		}
-
-		backend := r.pool.Get(tx.Backend)
-
-		// update OTID mapping if new one appears
-		if msg.OTID != 0 {
-			r.txTable.Store(msg.OTID, tx.Backend)
-		}
-
-		err := backend.Write(raw)
-		if err != nil {
+		if err := backend.Write(raw); err != nil {
 			log.Println("backend write error:", err)
 		}
 
@@ -71,21 +54,21 @@ func (r *Router) Route(msg TCAPMessage, raw []byte) {
 			return
 		}
 
-		tx, ok := r.txTable.Lookup(msg.DTID)
+		idx := hashBackend(msg.DTID, len(r.pool.backends))
+		backend := r.pool.Get(idx)
 
-		if !ok {
-			log.Println("transaction not found for DTID:", msg.DTID)
-			return
-		}
-
-		backend := r.pool.Get(tx.Backend)
-
-		err := backend.Write(raw)
-		if err != nil {
+		if err := backend.Write(raw); err != nil {
 			log.Println("backend write error:", err)
 		}
-
-		// remove session after transaction completes
-		r.txTable.Delete(msg.DTID)
 	}
+}
+
+func hashBackend(otid uint64, count int) int {
+	h := fnv.New32a()
+	var b [8]byte
+	for i := 0; i < 8; i++ {
+		b[i] = byte(otid >> (8 * i))
+	}
+	h.Write(b[:])
+	return int(h.Sum32()) % count
 }
