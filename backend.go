@@ -19,6 +19,10 @@ type BackendPool struct {
 func NewBackendPool(addrs []string) *BackendPool {
 	var backends []Backend
 
+	if len(addrs) == 0 {
+		log.Fatal("no backends configured")
+	}
+
 	for _, a := range addrs {
 
 		conn, err := net.Dial("tcp", a)
