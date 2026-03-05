@@ -36,7 +36,7 @@ func NewBackendPool(addrs []string) *BackendPool {
 }
 
 func (p *BackendPool) Next() (Backend, int) {
-	i := atomic.AddUint64(&p.counter, 1)
+	i := atomic.AddUint64(&p.counter, 1) - 1
 	idx := int(i) % len(p.backends)
 
 	return p.backends[idx], idx
