@@ -1,7 +1,6 @@
 package main
 
 import (
-	"hash/fnv"
 	"log"
 )
 
@@ -15,7 +14,7 @@ func NewRouter(backends []string) *Router {
 	}
 }
 
-func (r *Router) Route(msg TCAPMessage, raw []byte) {
+func (r *Router) Route(msg TCAPMessage, pkt Packet) {
 
 	switch msg.Type {
 
@@ -23,13 +22,15 @@ func (r *Router) Route(msg TCAPMessage, raw []byte) {
 
 		if msg.OTID == 0 {
 			log.Println("invalid TCAP BEGIN: missing OTID")
+			// Must return to pool if we drop early
+			bufferPool.Put(pkt.Buffer)
 			return
 		}
 
 		idx := hashBackend(msg.OTID, len(r.pool.backends))
 		backend := r.pool.Get(idx)
 
-		if err := backend.Write(raw); err != nil {
+		if err := backend.Write(pkt); err != nil {
 			log.Println("backend write error:", err)
 		}
 
@@ -37,13 +38,14 @@ func (r *Router) Route(msg TCAPMessage, raw []byte) {
 
 		if msg.DTID == 0 {
 			log.Println("invalid TCAP CONTINUE: missing DTID")
+			bufferPool.Put(pkt.Buffer)
 			return
 		}
 
 		idx := hashBackend(msg.DTID, len(r.pool.backends))
 		backend := r.pool.Get(idx)
 
-		if err := backend.Write(raw); err != nil {
+		if err := backend.Write(pkt); err != nil {
 			log.Println("backend write error:", err)
 		}
 
@@ -51,24 +53,26 @@ func (r *Router) Route(msg TCAPMessage, raw []byte) {
 
 		if msg.DTID == 0 {
 			log.Println("invalid TCAP END/ABORT: missing DTID")
+			bufferPool.Put(pkt.Buffer)
 			return
 		}
 
 		idx := hashBackend(msg.DTID, len(r.pool.backends))
 		backend := r.pool.Get(idx)
 
-		if err := backend.Write(raw); err != nil {
+		if err := backend.Write(pkt); err != nil {
 			log.Println("backend write error:", err)
 		}
 	}
 }
 
+// inline zero-allocation hash
 func hashBackend(otid uint64, count int) int {
-	h := fnv.New32a()
-	var b [8]byte
-	for i := 0; i < 8; i++ {
-		b[i] = byte(otid >> (8 * i))
-	}
-	h.Write(b[:])
-	return int(h.Sum32()) % count
+	h := otid
+	h ^= h >> 33
+	h *= 0xff51afd7ed558ccd
+	h ^= h >> 33
+	h *= 0xc4ceb9fe1a85ec53
+	h ^= h >> 33
+	return int(h % uint64(count))
 }
