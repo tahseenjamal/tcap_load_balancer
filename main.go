@@ -12,8 +12,11 @@ func main() {
 
 	workerCount := runtime.NumCPU()
 
+	workerQueues = make([]chan Packet, workerCount)
+
 	for i := 0; i < workerCount; i++ {
-		go StartWorker(router)
+		workerQueues[i] = make(chan Packet, 100000)
+		go StartWorker(router, workerQueues[i])
 	}
 
 	log.Println("TCAP Load Balancer Started")

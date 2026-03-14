@@ -5,6 +5,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/ishidawataru/sctp"
 )
@@ -15,6 +16,10 @@ var bufferPool = sync.Pool{
 		return &buf
 	},
 }
+
+var workerQueues []chan Packet
+var nextWorker uint64
+
 
 func StartListener(addr string) {
 
@@ -66,10 +71,10 @@ func handleConn(conn net.Conn) {
 			Buffer: bufPtr,
 		}
 
+		idx := atomic.AddUint64(&nextWorker, 1) % uint64(len(workerQueues))
+
 		select {
-
-		case packetQueue <- packet:
-
+		case workerQueues[idx] <- packet:
 		default:
 			log.Println("packet queue full, dropping packet")
 			bufferPool.Put(bufPtr)
