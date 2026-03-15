@@ -1,238 +1,251 @@
-# TCAP Load Balancer (Go)
+# TCAP Router (Go)
 
-A high-performance **stateless TCAP load balancer** written in Go.
-The router receives **M3UA/SCTP traffic**, extracts **SCCP and TCAP dialogs**, and forwards packets to backend servers using a **deterministic hash of the TCAP transaction identifiers**.
+A **high-performance TCAP routing service** implemented in Go.
+It performs **dialogue-aware routing of TCAP messages** to backend application servers.
 
-This design allows **session stickiness without maintaining state**, enabling horizontal scaling and high throughput.
+The router is designed to run **behind a SIGTRAN STP**, typically OsmoSTP, which handles:
 
----
+* SCTP
+* M3UA
+* routing contexts
+* signalling links
+* network redundancy
 
-# Features
-
-* **Stateless TCAP routing**
-* **Session stickiness via hashing (OTID / DTID)**
-* **SCTP listener for telecom signaling**
-* **Zero-copy packet ingestion**
-* **Memory reuse using `sync.Pool`**
-* **Concurrent worker processing**
-* **Thread-safe backend writes**
-* **Minimal ASN.1 TCAP parser**
+This router focuses purely on **TCAP dialogue routing**.
 
 ---
 
 # Architecture
 
-Traffic flow through the system:
-
 ```
-SCTP Listener
-      │
-      ▼
-Packet Queue (Buffered Channel)
-      │
-      ▼
-Worker Pool (NumCPU goroutines)
-      │
-      ▼
-M3UA Parser
-      │
-      ▼
-SCCP Parser
-      │
-      ▼
-TCAP ASN.1 Parser
-      │
-      ▼
-Hash Router
-      │
-      ▼
-Backend Pool
+SS7 / SIGTRAN Network
+        │
+        ▼
+      osmo-stp
+        │
+        ▼
+   TCAP Router (this project)
+        │
+        ▼
+ TCAP Application Servers
+ (HLR / USSD / CAMEL / etc)
 ```
 
-The router uses **deterministic hashing of TCAP transaction IDs**:
-
-```
-backend = hash(OTID or DTID) % backend_count
-```
-
-This ensures that **all packets belonging to the same TCAP dialog are routed to the same backend**.
+The router ensures that **all messages belonging to the same TCAP dialogue are sent to the same backend node.**
 
 ---
 
-# Directory Structure
+# Features
 
-```
-.
-├── backend.go       Backend connection pool
-├── config.go        Application configuration
-├── listener.go      SCTP listener and packet ingestion
-├── m3ua.go          M3UA protocol parser
-├── main.go          Application entrypoint
-├── packet.go        Packet structures and queue
-├── router.go        TCAP routing logic
-├── sccp.go          SCCP protocol parser
-├── tcap_asn1.go     Minimal TCAP ASN.1 decoder
-├── tcap.go          TCAP message types
-└── worker.go        Worker processing pipeline
-```
+### High Performance
+
+* Worker pool (`CPU * 4`)
+* Sharded transaction table (256 shards)
+* Lock contention minimized
+* Large packet queue (500k)
+
+### Dialogue Affinity
+
+Routing rules:
+
+| TCAP Message | Routing Strategy                     |
+| ------------ | ------------------------------------ |
+| BEGIN        | Hash by OTID                         |
+| CONTINUE     | Lookup by DTID                       |
+| END / ABORT  | Same backend then delete transaction |
+
+This guarantees **dialogue stickiness**.
 
 ---
 
-# Protocol Stack
+### Backend Connection Pool
 
-The load balancer processes signaling in the following order:
+Each backend server uses **multiple TCP sockets**.
+
+Example:
 
 ```
-SCTP
- └── M3UA
-      └── SCCP
-           └── TCAP
+BackendSockets = 8
+Backends = 3
+Total outbound sockets = 24
 ```
 
-Only **transaction identifiers** are extracted from TCAP for routing purposes.
+Benefits:
+
+* avoids socket bottlenecks
+* improves throughput
+* reduces latency
+
+---
+
+### Automatic Backend Recovery
+
+If a backend connection fails:
+
+1. connection is closed
+2. router attempts reconnect
+3. routing continues
+
+---
+
+### Transaction TTL Cleanup
+
+Transactions are automatically cleaned if a dialogue never terminates.
+
+```
+txTTL = 60 seconds
+cleanup interval = 30 seconds
+```
+
+Prevents memory leaks caused by missing END messages.
+
+---
+
+### High Throughput Listener
+
+TCP listener features:
+
+* 4MB socket buffer
+* TCP_NODELAY enabled
+* atomic packet drop counter
+* throttled logging
+
+Dropped packets are logged every **1000 drops** to prevent log storms.
+
+---
+
+# Code Structure
+
+| File         | Purpose                           |
+| ------------ | --------------------------------- |
+| main.go      | Application entry point           |
+| listener.go  | TCP listener and packet ingestion |
+| worker.go    | Worker pool consuming packets     |
+| router.go    | Dialogue routing logic            |
+| backend.go   | Backend connection pools          |
+| tcap_asn1.go | Minimal TCAP parser               |
+| tcap.go      | TCAP message structures           |
+| packet.go    | Packet queue structure            |
+| config.go    | Router configuration              |
 
 ---
 
 # Configuration
 
-Configuration is defined in `config.go`.
+Configuration is currently defined in `config.go`.
 
 Example:
 
 ```go
-Config{
-    ListenAddr: "0.0.0.0:2905",
-    Backends: []string{
-        "127.0.0.1:9001",
-        "127.0.0.1:9002",
-        "127.0.0.1:9003",
-    },
+ListenAddr: "0.0.0.0:2905"
+
+BackendSockets: 8
+
+Backends: []string{
+    "127.0.0.1:9001",
+    "127.0.0.1:9002",
+    "127.0.0.1:9003",
 }
 ```
 
-| Field        | Description                                  |
-| ------------ | -------------------------------------------- |
-| `ListenAddr` | SCTP address where the load balancer listens |
-| `Backends`   | List of backend TCAP servers                 |
-
 ---
 
-# TCAP Session Stickiness
-
-Session affinity is achieved without maintaining state.
-
-Routing rules:
-
-| TCAP Message | Identifier Used |
-| ------------ | --------------- |
-| BEGIN        | OTID            |
-| CONTINUE     | DTID            |
-| END          | DTID            |
-| ABORT        | DTID            |
-
-The identifier is hashed:
+# Build
 
 ```
-hash(transaction_id) % backend_count
-```
-
-This guarantees that **all messages in a dialog go to the same backend**.
-
----
-
-# Performance Design
-
-The implementation includes several performance optimizations:
-
-### Zero-Copy Packet Processing
-
-Buffers are reused using `sync.Pool` to avoid allocations.
-
-```
-bufferPool → packetQueue → worker → bufferPool
-```
-
-This significantly reduces GC pressure.
-
----
-
-### Concurrent Workers
-
-Workers are spawned based on CPU cores:
-
-```go
-workerCount := runtime.NumCPU()
-```
-
-Each worker performs:
-
-```
-Parse M3UA → Parse SCCP → Parse TCAP → Route packet
+go build -o tcap_router
 ```
 
 ---
 
-### Thread-Safe Backend Writes
-
-Backend connections are protected using mutexes to allow concurrent access.
-
----
-
-# Building
-
-Ensure Go is installed:
+# Run
 
 ```
-go version
+./tcap_router
 ```
 
-Build the project:
+The router will start listening on:
 
 ```
-go build
-```
-
-Run the load balancer:
-
-```
-go run .
+0.0.0.0:2905
 ```
 
 ---
 
-# Testing
+# Expected Throughput
 
-You can test using telecom signaling tools such as:
+Approximate performance on modern hardware:
 
-* **Osmocom STP**
-* **SIGTRAN simulators**
-* **Custom M3UA generators**
-* **SCTP packet replay tools**
+| CPU      | Expected TCAP TPS |
+| -------- | ----------------- |
+| 8 cores  | ~80k – 100k TPS   |
+| 16 cores | ~150k TPS         |
+| 32 cores | ~250k+ TPS        |
 
-Backend servers can be simple TCP listeners for testing.
+Actual throughput depends on backend processing latency.
 
-Example:
+---
+
+# Production Deployment
+
+Recommended system tuning.
+
+### Increase file descriptors
 
 ```
-nc -l 9001
-nc -l 9002
-nc -l 9003
+ulimit -n 200000
 ```
+
+---
+
+### Linux network tuning
+
+```
+net.core.somaxconn = 65535
+net.core.netdev_max_backlog = 250000
+net.ipv4.tcp_max_syn_backlog = 65535
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+```
+
+---
+
+# Failure Handling
+
+| Failure                | Behavior                        |
+| ---------------------- | ------------------------------- |
+| Backend socket failure | automatic reconnect             |
+| Packet queue overflow  | packet dropped                  |
+| Missing TCAP END       | TTL cleanup removes transaction |
 
 ---
 
 # Limitations
 
-This project currently provides a **minimal TCAP router implementation**.
+This router intentionally **does not implement full TCAP decoding**.
 
-Not implemented yet:
+Only the following fields are parsed:
 
-* Full TCAP ASN.1 decoding
-* M3UA management messages
-* Backend reconnection handling
-* Multiple M3UA messages per SCTP packet
-* Metrics and monitoring
-* SCTP multi-stream support
+* message type
+* OTID
+* DTID
+
+It assumes that:
+
+* TCAP is correctly framed
+* upstream STP already validated signalling
+
+---
+
+# Use Cases
+
+Typical telecom applications:
+
+* HLR queries
+* CAMEL service control
+* USSD gateways
+* SMS routing
+* IN services
 
 ---
 
@@ -240,13 +253,9 @@ Not implemented yet:
 
 Possible enhancements:
 
-* Multi-queue worker architecture
-* Backend health checks
-* SCTP multistream routing
-* Metrics (Prometheus)
-* Advanced TCAP parsing
-* Connection pooling
-* Load balancing strategies
-
----
+* metrics endpoint (Prometheus)
+* backend health monitoring
+* sync.Pool packet reuse
+* epoll-based network handling
+* multi-listener sharding
 

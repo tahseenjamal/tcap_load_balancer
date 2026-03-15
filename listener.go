@@ -3,12 +3,15 @@ package main
 import (
 	"log"
 	"net"
+	"sync/atomic"
 )
 
 const (
 	readBufferSize = 4 * 1024 * 1024 // 4MB socket buffer
 	maxPacketSize  = 65535
 )
+
+var dropped uint64
 
 func StartListener(addr string) {
 
@@ -35,9 +38,11 @@ func handleConn(conn net.Conn) {
 
 	defer conn.Close()
 
-	// Tune socket buffers for high throughput
+	// TCP tuning for high throughput
 	if tcp, ok := conn.(*net.TCPConn); ok {
+
 		tcp.SetReadBuffer(readBufferSize)
+		tcp.SetNoDelay(true)
 	}
 
 	buf := make([]byte, maxPacketSize)
@@ -49,7 +54,7 @@ func handleConn(conn net.Conn) {
 			return
 		}
 
-		// Allocate exact-size packet
+		// allocate exact-sized packet
 		data := make([]byte, n)
 		copy(data, buf[:n])
 
@@ -62,8 +67,13 @@ func handleConn(conn net.Conn) {
 		case packetQueue <- packet:
 
 		default:
-			// queue full, drop packet
-			log.Println("packet queue full, dropping packet")
+
+			count := atomic.AddUint64(&dropped, 1)
+
+			// throttle logging
+			if count%1000 == 0 {
+				log.Println("packet queue full, dropped:", count)
+			}
 		}
 	}
 }

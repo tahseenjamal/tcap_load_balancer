@@ -2,22 +2,45 @@ package main
 
 import (
 	"hash/fnv"
-	"log"
 	"sync"
+	"time"
 )
 
-type Router struct {
-	pool *BackendPool
-	tx   map[uint64]int
-	mu   sync.RWMutex
+const shardCount = 256
+const txTTL = 60 * time.Second
+
+type TxEntry struct {
+	backend int
+	ts      time.Time
 }
 
-func NewRouter(backends []string) *Router {
+type TxShard struct {
+	mu sync.RWMutex
+	m  map[uint64]TxEntry
+}
 
-	return &Router{
-		pool: NewBackendPool(backends),
-		tx:   make(map[uint64]int),
+type Router struct {
+	pool   *BackendPool
+	shards [shardCount]TxShard
+}
+
+func NewRouter(backends []string, sockets int) *Router {
+
+	r := &Router{
+		pool: NewBackendPool(backends, sockets),
 	}
+
+	for i := range r.shards {
+		r.shards[i].m = make(map[uint64]TxEntry)
+	}
+
+	go r.cleanup()
+
+	return r
+}
+
+func (r *Router) shard(id uint64) *TxShard {
+	return &r.shards[id%shardCount]
 }
 
 func (r *Router) Route(msg TCAPMessage, raw []byte) {
@@ -26,61 +49,90 @@ func (r *Router) Route(msg TCAPMessage, raw []byte) {
 
 	case TCAP_BEGIN:
 
-		if msg.OTID == 0 {
-			log.Println("invalid BEGIN")
-			return
-		}
-
 		idx := hashBackend(msg.OTID, len(r.pool.backends))
 
-		r.mu.Lock()
-		r.tx[msg.OTID] = idx
-		r.mu.Unlock()
+		shard := r.shard(msg.OTID)
+
+		shard.mu.Lock()
+		shard.m[msg.OTID] = TxEntry{backend: idx, ts: time.Now()}
+		shard.mu.Unlock()
 
 		r.pool.Get(idx).Write(raw)
 
 	case TCAP_CONTINUE:
 
-		if msg.DTID == 0 {
-			return
-		}
+		shard := r.shard(msg.DTID)
 
-		r.mu.RLock()
-		idx, ok := r.tx[msg.DTID]
-		r.mu.RUnlock()
+		shard.mu.RLock()
+		entry, ok := shard.m[msg.DTID]
+		shard.mu.RUnlock()
 
-		if !ok {
+		var idx int
+
+		if ok {
+			idx = entry.backend
+		} else {
 			idx = hashBackend(msg.DTID, len(r.pool.backends))
 		}
 
 		if msg.OTID != 0 {
 
-			r.mu.Lock()
-			r.tx[msg.OTID] = idx
-			r.mu.Unlock()
+			shard2 := r.shard(msg.OTID)
+
+			shard2.mu.Lock()
+			shard2.m[msg.OTID] = TxEntry{backend: idx, ts: time.Now()}
+			shard2.mu.Unlock()
 		}
 
 		r.pool.Get(idx).Write(raw)
 
 	case TCAP_END, TCAP_ABORT:
 
-		if msg.DTID == 0 {
-			return
-		}
+		shard := r.shard(msg.DTID)
 
-		r.mu.RLock()
-		idx, ok := r.tx[msg.DTID]
-		r.mu.RUnlock()
+		shard.mu.RLock()
+		entry, ok := shard.m[msg.DTID]
+		shard.mu.RUnlock()
 
-		if !ok {
+		var idx int
+
+		if ok {
+			idx = entry.backend
+		} else {
 			idx = hashBackend(msg.DTID, len(r.pool.backends))
 		}
 
 		r.pool.Get(idx).Write(raw)
 
-		r.mu.Lock()
-		delete(r.tx, msg.DTID)
-		r.mu.Unlock()
+		shard.mu.Lock()
+		delete(shard.m, msg.DTID)
+		shard.mu.Unlock()
+	}
+}
+
+func (r *Router) cleanup() {
+
+	ticker := time.NewTicker(30 * time.Second)
+
+	for range ticker.C {
+
+		now := time.Now()
+
+		for i := range r.shards {
+
+			shard := &r.shards[i]
+
+			shard.mu.Lock()
+
+			for k, v := range shard.m {
+
+				if now.Sub(v.ts) > txTTL {
+					delete(shard.m, k)
+				}
+			}
+
+			shard.mu.Unlock()
+		}
 	}
 }
 
