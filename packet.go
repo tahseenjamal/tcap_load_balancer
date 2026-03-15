@@ -1,8 +1,7 @@
 package main
 
 type Packet struct {
-	Data   []byte
-	Buffer *[]byte
+	Data []byte
 }
 
 var packetQueue = make(chan Packet, 500000)

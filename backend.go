@@ -18,17 +18,13 @@ type BackendPool struct {
 
 func NewBackendPool(addrs []string) *BackendPool {
 
-	if len(addrs) == 0 {
-		log.Fatal("no backends configured")
-	}
-
 	var backends []Backend
 
 	for _, a := range addrs {
 
 		conn, err := net.Dial("tcp", a)
 		if err != nil {
-			log.Fatalf("failed to connect backend %s: %v", a, err)
+			log.Fatalf("backend connect failed %s", a)
 		}
 
 		log.Println("connected backend:", a)
@@ -50,6 +46,20 @@ func (b *Backend) Write(data []byte) error {
 	defer b.mu.Unlock()
 
 	_, err := b.Conn.Write(data)
+
+	if err != nil {
+
+		b.Conn.Close()
+
+		conn, err2 := net.Dial("tcp", b.Addr)
+		if err2 != nil {
+			return err
+		}
+
+		b.Conn = conn
+		_, err = b.Conn.Write(data)
+	}
+
 	return err
 }
 

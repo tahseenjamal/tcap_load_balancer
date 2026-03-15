@@ -6,17 +6,18 @@ import (
 )
 
 func main() {
+
 	config := LoadConfig()
 
 	router := NewRouter(config.Backends)
 
-	workerCount := runtime.NumCPU()
+	workers := runtime.NumCPU() * 2
 
-	for i := 0; i < workerCount; i++ {
+	for i := 0; i < workers; i++ {
 		go StartWorker(router)
 	}
 
-	log.Println("TCAP Load Balancer Started")
+	log.Println("TCAP Router started")
 
 	StartListener(config.ListenAddr)
 }

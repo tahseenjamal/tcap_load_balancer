@@ -7,8 +7,6 @@ Extracts:
 - Message Type
 - OTID
 - DTID
-
-It does NOT fully decode TCAP components.
 */
 
 func ParseTCAPASN1(data []byte) (TCAPMessage, bool) {
@@ -18,15 +16,6 @@ func ParseTCAPASN1(data []byte) (TCAPMessage, bool) {
 	}
 
 	msg := TCAPMessage{}
-
-	/*
-	   TCAP Message Tags
-
-	   0x62 BEGIN
-	   0x65 CONTINUE
-	   0x64 END
-	   0x67 ABORT
-	*/
 
 	switch data[0] {
 
@@ -46,21 +35,15 @@ func ParseTCAPASN1(data []byte) (TCAPMessage, bool) {
 		return TCAPMessage{}, false
 	}
 
-	/*
-	   Scan for transaction identifiers.
-
-	   OTID tag = 0x48
-	   DTID tag = 0x49
-
-	   Format:
-	   Tag | Length | Value
-	*/
-
 	for i := 0; i < len(data)-2; i++ {
+
+		if msg.OTID != 0 && msg.DTID != 0 {
+			break
+		}
 
 		switch data[i] {
 
-		case 0x48: // OTID
+		case 0x48:
 
 			length := int(data[i+1])
 
@@ -76,7 +59,7 @@ func ParseTCAPASN1(data []byte) (TCAPMessage, bool) {
 
 			msg.OTID = val
 
-		case 0x49: // DTID
+		case 0x49:
 
 			length := int(data[i+1])
 

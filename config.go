@@ -6,6 +6,7 @@ type Config struct {
 }
 
 func LoadConfig() Config {
+
 	return Config{
 		ListenAddr: "0.0.0.0:2905",
 		Backends: []string{
