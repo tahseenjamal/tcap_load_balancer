@@ -20,10 +20,6 @@ func NewM3UAServer(addr string, dispatch func(Packet)) {
 	go s.listen()
 }
 
-///////////////////////////////////////////////////////////
-// LISTENER
-///////////////////////////////////////////////////////////
-
 func (s *M3UAServer) listen() {
 	laddr, err := sctp.ResolveSCTPAddr("sctp", s.addr)
 	if err != nil {
@@ -38,7 +34,6 @@ func (s *M3UAServer) listen() {
 	log.Println("M3UA Server listening on", s.addr)
 
 	for {
-
 		conn, err := ln.AcceptSCTP()
 		if err != nil {
 			log.Println("Accept error:", err)
@@ -53,13 +48,24 @@ func (s *M3UAServer) listen() {
 			writeQ:   make(chan []byte, 100000),
 		}
 
-		///////////////////////////////////////////////////////
-		// REGISTER BACKEND (MULTI BACKEND SUPPORT)
-		///////////////////////////////////////////////////////
-
 		backendPoolMu.Lock()
-		backendPool = append(backendPool, m)
-		idx := len(backendPool) - 1
+
+		// 🔥 reuse empty slot
+		idx := -1
+		for i, c := range backendPool {
+			if c == nil {
+				backendPool[i] = m
+				idx = i
+				break
+			}
+		}
+
+		// 🔥 if no empty slot → append
+		if idx == -1 {
+			backendPool = append(backendPool, m)
+			idx = len(backendPool) - 1
+		}
+
 		backendPoolMu.Unlock()
 
 		log.Println("Backend index assigned:", idx)
@@ -69,20 +75,24 @@ func (s *M3UAServer) listen() {
 	}
 }
 
-///////////////////////////////////////////////////////////
-// SERVER READ LOOP (WITH BACKEND INDEX)
-///////////////////////////////////////////////////////////
-
 func (m *M3UAConn) readLoopServer(idx int) {
 	buf := make([]byte, 65535)
 
 	active := false
 
 	for {
-
 		n, err := m.conn.Read(buf)
 		if err != nil {
 			log.Println("Backend disconnected:", idx)
+
+			// 🔥 FIX: REMOVE FROM POOL
+			backendPoolMu.Lock()
+			if idx < len(backendPool) {
+				backendPool[idx] = nil
+			}
+			backendPoolMu.Unlock()
+
+			m.active.Store(false)
 			return
 		}
 
@@ -97,25 +107,18 @@ func (m *M3UAConn) readLoopServer(idx int) {
 
 		switch class {
 
-		///////////////////////////////////////////////////
-		// ASP STATE MACHINE
-		///////////////////////////////////////////////////
-
 		case 3: // ASPSM
-			if typ == 1 { // ASPUP
-				m.sendSimple(3, 4) // ASPUP_ACK
+			if typ == 1 {
+				m.sendSimple(3, 4)
 			}
 
 		case 4: // ASPTM
-			if typ == 1 { // ASPAC
-				m.sendSimple(4, 4) // ASPAC_ACK
+			if typ == 1 {
+				m.sendSimple(4, 4)
 				active = true
+				m.active.Store(true)
 				log.Println("Backend ASP ACTIVE:", idx)
 			}
-
-		///////////////////////////////////////////////////
-		// DATA (CRITICAL PATH)
-		///////////////////////////////////////////////////
 
 		case 1: // TRANSFER
 			if typ == 1 && active {
@@ -125,8 +128,8 @@ func (m *M3UAConn) readLoopServer(idx int) {
 				if sccp != nil {
 					m.dispatch(Packet{
 						Data:        sccp,
-						Src:         idx,  // ✅ CRITICAL FIX
-						FromBackend: true, // direction flag
+						Src:         idx,
+						FromBackend: true,
 					})
 				}
 			}

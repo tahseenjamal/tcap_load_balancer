@@ -189,14 +189,17 @@ func sendBackend(data []byte, idx int) {
 	backendPoolMu.RLock()
 	defer backendPoolMu.RUnlock()
 
-	if len(backendPool) == 0 {
+	n := len(backendPool)
+	if n == 0 {
 		return
 	}
 
-	conn := backendPool[idx%len(backendPool)]
-	if conn == nil {
-		return
-	}
+	for i := 0; i < n; i++ {
+		conn := backendPool[(idx+i)%n]
 
-	conn.SendData(data)
+		if conn != nil && conn.active.Load() {
+			conn.SendData(data)
+			return
+		}
+	}
 }
