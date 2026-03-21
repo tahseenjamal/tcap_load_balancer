@@ -1,17 +1,36 @@
 package main
 
 import (
-	"hash/fnv"
 	"sync"
 	"time"
 )
 
-const shardCount = 256
-const txTTL = 60 * time.Second
+const (
+	shardCount = 256
+	txTTL      = 60 * time.Second
+)
+
+///////////////////////////////////////////////////////////
+// GLOBAL M3UA CONNECTION POOL
+///////////////////////////////////////////////////////////
+
+var (
+	// STP side connections (Go → osmo-stp)
+	m3uaPool []*M3UAConn
+
+	// Backend connections (backend apps → Go)
+	backendPool   []*M3UAConn
+	backendPoolMu sync.RWMutex
+)
+
+///////////////////////////////////////////////////////////
+// TRANSACTION STATE
+///////////////////////////////////////////////////////////
 
 type TxEntry struct {
-	backend int
-	ts      time.Time
+	src int
+	dst int
+	ts  time.Time
 }
 
 type TxShard struct {
@@ -20,15 +39,15 @@ type TxShard struct {
 }
 
 type Router struct {
-	pool   *BackendPool
 	shards [shardCount]TxShard
 }
 
-func NewRouter(backends []string, sockets int) *Router {
+///////////////////////////////////////////////////////////
+// INIT
+///////////////////////////////////////////////////////////
 
-	r := &Router{
-		pool: NewBackendPool(backends, sockets),
-	}
+func NewRouter() *Router {
+	r := &Router{}
 
 	for i := range r.shards {
 		r.shards[i].m = make(map[uint64]TxEntry)
@@ -43,75 +62,106 @@ func (r *Router) shard(id uint64) *TxShard {
 	return &r.shards[id%shardCount]
 }
 
-func (r *Router) Route(msg TCAPMessage, raw []byte) {
+///////////////////////////////////////////////////////////
+// HASH (better than simple modulo)
+///////////////////////////////////////////////////////////
 
+func hash(id uint64, n int) int {
+	return int((id ^ (id >> 32)) % uint64(n))
+}
+
+///////////////////////////////////////////////////////////
+// ROUTING
+///////////////////////////////////////////////////////////
+
+func (r *Router) Route(msg TCAPMessage, pkt Packet) {
 	switch msg.Type {
+
+	///////////////////////////////////////////////////////
+	// BEGIN
+	///////////////////////////////////////////////////////
 
 	case TCAP_BEGIN:
 
-		idx := hashBackend(msg.OTID, len(r.pool.backends))
+		if pkt.FromBackend {
 
-		shard := r.shard(msg.OTID)
+			// Backend → STP
+			if len(m3uaPool) == 0 {
+				return
+			}
+			dst := hash(msg.OTID, len(m3uaPool))
 
-		shard.mu.Lock()
-		shard.m[msg.OTID] = TxEntry{backend: idx, ts: time.Now()}
-		shard.mu.Unlock()
+			sh := r.shard(msg.OTID)
 
-		r.pool.Get(idx).Write(raw)
+			sh.mu.Lock()
+			sh.m[msg.OTID] = TxEntry{
+				dst: dst,
+				ts:  time.Now(),
+			}
+			sh.mu.Unlock()
 
-	case TCAP_CONTINUE:
+			sendM3UA(dst, pkt.Data)
 
-		shard := r.shard(msg.DTID)
-
-		shard.mu.RLock()
-		entry, ok := shard.m[msg.DTID]
-		shard.mu.RUnlock()
-
-		var idx int
-
-		if ok {
-			idx = entry.backend
 		} else {
-			idx = hashBackend(msg.DTID, len(r.pool.backends))
+			// STP → Backend (rare case)
+			sendBackend(pkt.Data, pkt.Src)
 		}
 
-		if msg.OTID != 0 {
+	///////////////////////////////////////////////////////
+	// CONTINUE / END / ABORT
+	///////////////////////////////////////////////////////
 
-			shard2 := r.shard(msg.OTID)
+	case TCAP_CONTINUE, TCAP_END, TCAP_ABORT:
 
-			shard2.mu.Lock()
-			shard2.m[msg.OTID] = TxEntry{backend: idx, ts: time.Now()}
-			shard2.mu.Unlock()
+		sh := r.shard(msg.DTID)
+
+		sh.mu.RLock()
+		entry, ok := sh.m[msg.DTID]
+		sh.mu.RUnlock()
+
+		if !ok {
+			return
 		}
 
-		r.pool.Get(idx).Write(raw)
-
-	case TCAP_END, TCAP_ABORT:
-
-		shard := r.shard(msg.DTID)
-
-		shard.mu.RLock()
-		entry, ok := shard.m[msg.DTID]
-		shard.mu.RUnlock()
-
-		var idx int
-
-		if ok {
-			idx = entry.backend
+		if pkt.FromBackend {
+			// Backend → STP
+			sendM3UA(entry.dst, pkt.Data)
 		} else {
-			idx = hashBackend(msg.DTID, len(r.pool.backends))
+			// STP → Backend
+			sendBackend(pkt.Data, pkt.Src)
 		}
 
-		r.pool.Get(idx).Write(raw)
-
-		shard.mu.Lock()
-		delete(shard.m, msg.DTID)
-		shard.mu.Unlock()
+		if msg.Type == TCAP_END || msg.Type == TCAP_ABORT {
+			sh.mu.Lock()
+			delete(sh.m, msg.DTID)
+			sh.mu.Unlock()
+		}
 	}
 }
 
-func (r *Router) cleanup() {
+///////////////////////////////////////////////////////////
+// M3UA SEND (CRITICAL FIX)
+///////////////////////////////////////////////////////////
 
+func sendM3UA(idx int, data []byte) {
+	if len(m3uaPool) == 0 {
+		return
+	}
+
+	conn := m3uaPool[idx%len(m3uaPool)]
+
+	if conn == nil {
+		return
+	}
+
+	conn.SendData(data)
+}
+
+///////////////////////////////////////////////////////////
+// CLEANUP
+///////////////////////////////////////////////////////////
+
+func (r *Router) cleanup() {
 	ticker := time.NewTicker(30 * time.Second)
 
 	for range ticker.C {
@@ -120,33 +170,33 @@ func (r *Router) cleanup() {
 
 		for i := range r.shards {
 
-			shard := &r.shards[i]
+			sh := &r.shards[i]
 
-			shard.mu.Lock()
+			sh.mu.Lock()
 
-			for k, v := range shard.m {
-
+			for k, v := range sh.m {
 				if now.Sub(v.ts) > txTTL {
-					delete(shard.m, k)
+					delete(sh.m, k)
 				}
 			}
 
-			shard.mu.Unlock()
+			sh.mu.Unlock()
 		}
 	}
 }
 
-func hashBackend(id uint64, count int) int {
+func sendBackend(data []byte, idx int) {
+	backendPoolMu.RLock()
+	defer backendPoolMu.RUnlock()
 
-	h := fnv.New32a()
-
-	var b [8]byte
-
-	for i := 0; i < 8; i++ {
-		b[i] = byte(id >> (8 * i))
+	if len(backendPool) == 0 {
+		return
 	}
 
-	h.Write(b[:])
+	conn := backendPool[idx%len(backendPool)]
+	if conn == nil {
+		return
+	}
 
-	return int(h.Sum32()) % count
+	conn.SendData(data)
 }

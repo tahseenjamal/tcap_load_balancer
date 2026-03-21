@@ -1,12 +1,18 @@
 package main
 
-func StartWorker(router *Router) {
+func StartWorker(router *Router, q chan Packet) {
+	for pkt := range q {
 
-	for pkt := range packetQueue {
-
-		tcap, ok := ParseTCAPASN1(pkt.Data)
-		if ok {
-			router.Route(tcap, pkt.Data)
+		sccp, ok := ParseSCCP(pkt.Data)
+		if !ok {
+			continue
 		}
+
+		tcap, ok := ParseTCAPASN1(sccp.Data)
+		if !ok {
+			continue
+		}
+
+		router.Route(tcap, pkt)
 	}
 }

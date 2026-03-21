@@ -1,7 +1,7 @@
 package main
 
 type Packet struct {
-	Data []byte
+	Data        []byte
+	Src         int // connection index
+	FromBackend bool
 }
-
-var packetQueue = make(chan Packet, 500000)

@@ -1,43 +1,75 @@
 package main
 
 import (
-	"context"
 	"log"
-	"os"
-	"os/signal"
 	"runtime"
-	"syscall"
 )
 
 func main() {
 
-	config := LoadConfig()
+	///////////////////////////////////////////////////////////
+	// INIT ROUTER
+	///////////////////////////////////////////////////////////
 
-	router := NewRouter(config.Backends, config.BackendSockets)
+	router := NewRouter()
+
+	///////////////////////////////////////////////////////////
+	// WORKER POOL (CPU-bound parsing)
+	///////////////////////////////////////////////////////////
 
 	workers := runtime.NumCPU() * 4
+	queues := make([]chan Packet, workers)
 
 	for i := 0; i < workers; i++ {
-		go StartWorker(router)
+		queues[i] = make(chan Packet, 100000)
+		go StartWorker(router, queues[i])
 	}
 
-	log.Println("TCAP Router started")
+	///////////////////////////////////////////////////////////
+	// DISPATCH FUNCTION (lock-free fanout)
+	///////////////////////////////////////////////////////////
 
-	go StartListener(config.ListenAddr)
+	dispatch := func(pkt Packet) {
 
-	waitForShutdown()
-}
+		// simple hash (fast path)
+		idx := int(pkt.Data[0]) % workers
 
-func waitForShutdown() {
+		select {
+		case queues[idx] <- pkt:
+		default:
+			// drop under extreme pressure (protect system)
+		}
+	}
 
-	ctx, stop := signal.NotifyContext(context.Background(),
-		os.Interrupt,
-		syscall.SIGTERM,
-	)
+	log.Println("Starting M3UA Router")
 
-	<-ctx.Done()
+	///////////////////////////////////////////////////////////
+	// 1. START M3UA SERVER (Backend → Go Router)
+	///////////////////////////////////////////////////////////
 
-	stop()
+	// Backend applications will connect here
+	NewM3UAServer("0.0.0.0:2906", dispatch)
 
-	log.Println("shutdown signal received")
+	log.Println("M3UA Server started on 0.0.0.0:2906")
+
+	///////////////////////////////////////////////////////////
+	// 2. START M3UA CLIENT POOL (Go Router → osmo-stp)
+	///////////////////////////////////////////////////////////
+
+	stpAddr := "127.0.0.1:2905" // 🔴 CHANGE to real STP IP in production
+
+	for i := 0; i < 4; i++ {
+
+		conn := NewM3UAConn(stpAddr, dispatch)
+
+		m3uaPool = append(m3uaPool, conn)
+	}
+
+	log.Println("Connected to STP:", stpAddr, "connections:", len(m3uaPool))
+
+	///////////////////////////////////////////////////////////
+	// BLOCK FOREVER
+	///////////////////////////////////////////////////////////
+
+	select {}
 }
