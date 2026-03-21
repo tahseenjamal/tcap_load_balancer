@@ -10,12 +10,27 @@ import (
 	"github.com/ishidawataru/sctp"
 )
 
+///////////////////////////////////////////////////////////
+// STATE MACHINE
+///////////////////////////////////////////////////////////
+
+const (
+	STATE_DOWN = iota
+	STATE_UP
+	STATE_ACTIVE
+)
+
+///////////////////////////////////////////////////////////
+// STRUCT
+///////////////////////////////////////////////////////////
+
 type M3UAConn struct {
 	addr string
 
 	conn *sctp.SCTPConn
 
 	active atomic.Bool
+	state  int
 
 	dispatch func(Packet)
 
@@ -24,11 +39,16 @@ type M3UAConn struct {
 	mu sync.Mutex
 }
 
+///////////////////////////////////////////////////////////
+// INIT
+///////////////////////////////////////////////////////////
+
 func NewM3UAConn(addr string, dispatch func(Packet)) *M3UAConn {
 	m := &M3UAConn{
 		addr:     addr,
 		dispatch: dispatch,
 		writeQ:   make(chan []byte, 100000),
+		state:    STATE_DOWN,
 	}
 
 	go m.connectLoop()
@@ -42,18 +62,21 @@ func NewM3UAConn(addr string, dispatch func(Packet)) *M3UAConn {
 ///////////////////////////////////////////////////////////
 
 func (m *M3UAConn) connectLoop() {
+
 	for {
 
 		log.Println("Connecting SCTP:", m.addr)
 
 		raddr, err := sctp.ResolveSCTPAddr("sctp", m.addr)
 		if err != nil {
+			log.Println("Resolve error:", err)
 			time.Sleep(time.Second)
 			continue
 		}
 
 		conn, err := sctp.DialSCTP("sctp", nil, raddr)
 		if err != nil {
+			log.Println("Dial error:", err)
 			time.Sleep(time.Second)
 			continue
 		}
@@ -64,9 +87,18 @@ func (m *M3UAConn) connectLoop() {
 
 		log.Println("SCTP connected")
 
+		m.state = STATE_DOWN
 		m.active.Store(false)
 
+		///////////////////////////////////////////////////
+		// START ASP HANDSHAKE
+		///////////////////////////////////////////////////
+
 		m.startASP()
+
+		///////////////////////////////////////////////////
+		// BLOCKING READ LOOP
+		///////////////////////////////////////////////////
 
 		m.readLoop()
 
@@ -76,10 +108,11 @@ func (m *M3UAConn) connectLoop() {
 }
 
 ///////////////////////////////////////////////////////////
-// ASP STATE MACHINE
+// ASP START
 ///////////////////////////////////////////////////////////
 
 func (m *M3UAConn) startASP() {
+	log.Println("Sending ASPUP")
 	m.sendSimple(3, 1) // ASPUP
 }
 
@@ -88,6 +121,7 @@ func (m *M3UAConn) startASP() {
 ///////////////////////////////////////////////////////////
 
 func (m *M3UAConn) readLoop() {
+
 	buf := make([]byte, 65535)
 
 	for {
@@ -95,6 +129,10 @@ func (m *M3UAConn) readLoop() {
 		n, err := m.conn.Read(buf)
 		if err != nil {
 			return
+		}
+
+		if n < 8 {
+			continue
 		}
 
 		m.handle(buf[:n])
@@ -106,43 +144,69 @@ func (m *M3UAConn) readLoop() {
 ///////////////////////////////////////////////////////////
 
 func (m *M3UAConn) handle(b []byte) {
-	if len(b) < 8 {
-		return
-	}
 
 	class := b[2]
 	typ := b[3]
 
 	switch class {
 
-	case 3: // ASPSM
+	///////////////////////////////////////////////////
+	// ASPSM
+	///////////////////////////////////////////////////
+
+	case 3:
 		if typ == 4 { // ASPUP_ACK
-			log.Println("ASPUP_ACK")
+			log.Println("ASPUP_ACK received")
+
+			m.state = STATE_UP
+
+			// ⚠️ IMPORTANT: small delay for STP stability
+			time.Sleep(50 * time.Millisecond)
+
+			log.Println("Sending ASPAC")
 			m.sendSimple(4, 1) // ASPAC
 		}
 
-	case 4: // ASPTM
+	///////////////////////////////////////////////////
+	// ASPTM
+	///////////////////////////////////////////////////
+
+	case 4:
 		if typ == 4 { // ASPAC_ACK
 			log.Println("ASP ACTIVE")
+
+			m.state = STATE_ACTIVE
 			m.active.Store(true)
 		}
 
-	case 1: // TRANSFER
+	///////////////////////////////////////////////////
+	// TRANSFER
+	///////////////////////////////////////////////////
+
+	case 1:
 		if typ == 1 { // DATA
+
+			if !m.active.Load() {
+				return
+			}
 
 			sccp := extractSCCP(b)
 			if sccp != nil {
-				m.dispatch(Packet{Data: sccp, FromBackend: false})
+				m.dispatch(Packet{
+					Data:        sccp,
+					FromBackend: false,
+				})
 			}
 		}
 	}
 }
 
 ///////////////////////////////////////////////////////////
-// SEND DATA (NON-BLOCKING)
+// SEND DATA
 ///////////////////////////////////////////////////////////
 
 func (m *M3UAConn) SendData(sccp []byte) {
+
 	if !m.active.Load() {
 		return
 	}
@@ -157,15 +221,17 @@ func (m *M3UAConn) SendData(sccp []byte) {
 }
 
 ///////////////////////////////////////////////////////////
-// WRITE LOOP (BATCHED)
+// WRITE LOOP (WITH PPID FIX)
 ///////////////////////////////////////////////////////////
 
 func (m *M3UAConn) writeLoop() {
+
 	batch := make([][]byte, 0, 128)
 
 	ticker := time.NewTicker(1 * time.Millisecond)
 
 	for {
+
 		select {
 
 		case msg := <-m.writeQ:
@@ -187,7 +253,12 @@ func (m *M3UAConn) writeLoop() {
 	}
 }
 
+///////////////////////////////////////////////////////////
+// FLUSH (CRITICAL: PPID = M3UA)
+///////////////////////////////////////////////////////////
+
 func (m *M3UAConn) flush(batch [][]byte) {
+
 	m.mu.Lock()
 	conn := m.conn
 	m.mu.Unlock()
@@ -196,8 +267,13 @@ func (m *M3UAConn) flush(batch [][]byte) {
 		return
 	}
 
+	info := &sctp.SndRcvInfo{
+		PPID: 3, // 🔥 CRITICAL FIX (M3UA PPID)
+	}
+
 	for _, msg := range batch {
-		_, err := conn.Write(msg)
+
+		_, err := conn.SCTPWrite(msg, info)
 		if err != nil {
 			log.Println("write error:", err)
 			return
@@ -206,10 +282,11 @@ func (m *M3UAConn) flush(batch [][]byte) {
 }
 
 ///////////////////////////////////////////////////////////
-// SIMPLE CONTROL MESSAGES
+// SIMPLE CONTROL MSG
 ///////////////////////////////////////////////////////////
 
 func (m *M3UAConn) sendSimple(class, typ uint8) {
+
 	buf := make([]byte, 8)
 
 	buf[0] = 1
@@ -225,18 +302,17 @@ func (m *M3UAConn) sendSimple(class, typ uint8) {
 }
 
 ///////////////////////////////////////////////////////////
-// M3UA BUILD (DATA)
+// BUILD M3UA DATA
 ///////////////////////////////////////////////////////////
 
 func buildM3UAData(payload []byte) []byte {
-	// Routing Context TLV
+
 	rc := []byte{
 		0x00, 0x06,
 		0x00, 0x08,
 		0x00, 0x00, 0x00, 0x01,
 	}
 
-	// Protocol Data TLV
 	pdLen := uint16(len(payload) + 4)
 
 	pd := make([]byte, 4)
@@ -262,10 +338,11 @@ func buildM3UAData(payload []byte) []byte {
 }
 
 ///////////////////////////////////////////////////////////
-// EXTRACT SCCP FROM M3UA (TLV PARSER)
+// EXTRACT SCCP
 ///////////////////////////////////////////////////////////
 
 func extractSCCP(b []byte) []byte {
+
 	i := 8
 
 	for i+4 <= len(b) {
